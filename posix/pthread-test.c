@@ -2,7 +2,7 @@
 
 void _add_wait_list(Waiter **wait_list, Waiter *waiter)
 {
-  if (NULL == *wait_list) {
+  if (*wait_list == NULL) {
     // Nothing in the list so add it directly.
     // Update prev and next pointer to reference self
     *wait_list = waiter;
@@ -45,17 +45,23 @@ void _remove_wait_list(Waiter **wait_list, Waiter *waiter)
   waiter->in_list = false;
 }
 
+int pthread_mutexattr_init(pthread_mutexattr_t *attr)
+{
+  memset (attr, 0, sizeof (*attr));
+  attr->name = "application_unnamed_mutex";
+  attr->attr_bits = osMutexPrioInherit;
+  return 0;
+}
 
 extern int pthread_mutex_init (pthread_mutex_t *__mutex, pthread_mutexattr_t *__mutexattr)
 {
-  memset (__mutex, 0, sizeof(*__mutex));
-  __mutexattr->name = "application_unnamed_mutex";
+  __mutex = calloc (1, sizeof (*__mutex));
+  memset(&__mutex->_obj_mem, 0, sizeof(__mutex->_obj_mem));
   __mutexattr->cb_mem = &__mutex->_obj_mem;
   __mutexattr->cb_size = sizeof(__mutex->_obj_mem);
-  __mutexattr->attr_bits = PTHREAD_PRIO_INHERIT;
+
   __mutex->_id = osMutexNew(__mutexattr);
-  printf ("\nID: %d", __mutex->_id);
-  return 0;
+  return __mutex->_id;
 }
 
 extern int pthread_mutex_destroy (pthread_mutex_t *__mutex)
@@ -63,30 +69,17 @@ extern int pthread_mutex_destroy (pthread_mutex_t *__mutex)
   return 0;
 }
 
-static int pthread_mutex_lock_for (pthread_mutex_t *__mutex, int millisec)
+static int pthread_mutex_lock_for (pthread_mutex_t * __mutex, int millisec)
 {
-  osStatus status = osMutexAcquire(__mutex->_id, millisec);
-  return status;
+  osMutexAcquire (__mutex->_id, millisec);
+  return 0;
 }
 
-extern int pthread_mutex_lock (pthread_mutex_t *__mutex)
-{
-  return osMutexAcquire(__mutex->_id, osWaitForever);
-}
 
-static int32_t wait (uint32_t millisec, pthread_cond_t *__restrict __cond)
+extern int pthread_mutex_lock (pthread_mutex_t * __mutex)
 {
-  osStatus_t stat = osSemaphoreAcquire(__cond->_id, millisec);
-  switch (stat) {
-    case osOK:
-      return osSemaphoreGetCount(__cond->_id) + 1;
-    case osErrorTimeout:
-    case osErrorResource:
-      return 0;
-    case osErrorParameter:
-    default:
-      return -1;
-  }
+  osMutexAcquire(__mutex->_id, osWaitForever);
+  return 0;
 }
 
 extern int pthread_mutex_unlock (pthread_mutex_t *__mutex)
@@ -97,10 +90,23 @@ extern int pthread_mutex_unlock (pthread_mutex_t *__mutex)
 
 extern int pthread_cond_init (pthread_cond_t *__restrict __cond, pthread_condattr_t *__restrict __cond_attr)
 {
-  memset(&__cond->_obj_mem, 0, sizeof(__cond->_obj_mem));
-  __cond_attr->cb_mem = &__cond->_obj_mem;
-  __cond_attr->cb_size = sizeof(__cond->_obj_mem);
-  __cond->_id = osSemaphoreNew(10, 0xffff, __cond_attr);
+  memset (&__cond->_obj_mem, 0, sizeof (__cond->_obj_mem));
+  if (__cond_attr == NULL)
+  {
+    pthread_condattr_t __cond_attr_new;
+    memset (&__cond_attr_new, 0, sizeof (__cond_attr_new));
+
+    __cond_attr_new.cb_mem = &__cond->_obj_mem;
+    __cond_attr_new.cb_size = sizeof (__cond->_obj_mem);
+    __cond->_id = osSemaphoreNew (10, 0xffff, &__cond_attr_new);
+  }
+  else
+  {
+    __cond_attr->cb_mem = &__cond->_obj_mem;
+    __cond_attr->cb_size = sizeof (__cond->_obj_mem);
+    __cond->_id = osSemaphoreNew (10, 0xffff, __cond_attr);
+  }
+
   return 0;
 }
 
@@ -128,6 +134,24 @@ extern int pthread_cond_broadcast (pthread_cond_t *__cond)
     pthread_cond_destroy(__cond->waiter._wait_list->sem);
     _remove_wait_list(&__cond->waiter._wait_list, __cond->waiter._wait_list);
   }
+
+  return 0;
+}
+
+
+static int32_t wait (uint32_t millisec, pthread_cond_t *__restrict __cond)
+{
+  osStatus_t stat = osSemaphoreAcquire(__cond->_id, millisec);
+  switch (stat){
+    case osOK:
+      return osSemaphoreGetCount(__cond->_id) + 1;
+    case osErrorTimeout:
+    case osErrorResource:
+      return 0;
+    case osErrorParameter:
+    default:
+      return -1;
+  }
 }
 
 extern int pthread_cond_wait (pthread_cond_t *__restrict __cond, pthread_mutex_t *__restrict __mutex)
@@ -136,11 +160,11 @@ extern int pthread_cond_wait (pthread_cond_t *__restrict __cond, pthread_mutex_t
   _add_wait_list(&__cond->waiter._wait_list, &current_thread);
 
   pthread_mutex_unlock (__mutex);
+
   int32_t sem_count = wait (osWaitForever ,current_thread.sem);
   bool timeout = (sem_count > 0) ? false : true;
 
   pthread_mutex_lock (__mutex);
-
 
   if (current_thread.in_list) {
     _remove_wait_list(&__cond->waiter._wait_list, &current_thread);
